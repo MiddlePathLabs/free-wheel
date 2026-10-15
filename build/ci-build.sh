@@ -32,6 +32,17 @@ for apk in assets/velolauncher.apk assets/serialbridge.apk; do
 done
 sha256sum assets/velolauncher.apk assets/serialbridge.apk
 
+# Both APKs must be signed with the velo-platform platform key
+# (keys/platform.x509.pem). The installer's update path replaces the
+# sharedUserId=system SerialBridge; an APK signed with any other key would
+# fail to install and leave the bike without sensors.
+PLATFORM_CERT_SHA256="2d370c21f5dfd553d2a796314b70925fb38adeef90864c920bbbbb12887d3522"
+if ! CGO_ENABLED=0 go run ./tools/apkcert "$PLATFORM_CERT_SHA256" \
+    assets/velolauncher.apk assets/serialbridge.apk; then
+  echo "::error::APKs from $VELO_TAG are not signed with the platform key"
+  exit 1
+fi
+
 # --- Version info ---
 VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
 VERSION=${VERSION#v}
