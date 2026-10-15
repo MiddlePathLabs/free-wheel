@@ -10,7 +10,7 @@ import (
 
 // RunRestore reverts the device to stock configuration.
 func RunRestore(ip string, log Logger) {
-	totalSteps := 8
+	totalSteps := 7
 
 	step := func(n int, name string) {
 		log.Step(fmt.Sprintf("[STEP %d/%d] %s", n, totalSteps, name))
@@ -52,6 +52,9 @@ func RunRestore(ip string, log Logger) {
 		conn.Shell("settings put secure notification_switch 0")
 		conn.Shell("settings put secure ntls_launcher_preference 1")
 		conn.Shell("settings put global stay_on_while_plugged_in 0")
+		// Serial port overrides used only by SerialBridge
+		conn.Shell("settings delete global freewheel_serial_dev 2>/dev/null")
+		conn.Shell("settings delete global freewheel_serial_baud 2>/dev/null")
 		// Keep .bowflex file — ADB must remain enabled so user can reconnect
 		conn.Shell("rm /sdcard/Download/MiscSettings/asset_manager_disabled 2>/dev/null")
 		conn.Close()
@@ -94,7 +97,7 @@ func RunRestore(ip string, log Logger) {
 		}
 	}
 
-	// --- Step 6: Clean factory_reset directory ---
+	// --- Step 5: Clean factory_reset directory ---
 	step(5, "Cleaning factory_reset directory")
 	conn, err = connect()
 	if err == nil {
@@ -116,12 +119,17 @@ func RunRestore(ip string, log Logger) {
 		}
 	}
 
-	// --- Step 7: Finalize stock configuration ---
+	// --- Step 6: Finalize stock configuration ---
 	step(6, "Finalizing stock configuration")
 	conn, err = connect()
 	if err == nil {
-		conn.Shell("pm disable-user --user 0 com.google.android.gms 2>/dev/null")
-		conn.Shell("pm disable-user --user 0 com.google.android.gsf 2>/dev/null")
+		// Do NOT disable GMS or GSF here (see commit 58ef6cc): on this
+		// Android 9 build they are required for the WiFi HAL and Bluetooth.
+		// Disabling them kills WiFi, which also kills ADB over WiFi, so the
+		// user could not reconnect to re-jailbreak. Re-enable them in case
+		// an older FreeWheel release disabled them.
+		conn.Shell("pm enable com.google.android.gms 2>/dev/null")
+		conn.Shell("pm enable com.google.android.gsf 2>/dev/null")
 		conn.Shell("pm disable-user --user 0 com.android.chrome 2>/dev/null")
 		conn.Shell("pm enable com.android.vending 2>/dev/null")
 		conn.Shell("pm enable com.google.android.webview 2>/dev/null")
@@ -130,10 +138,10 @@ func RunRestore(ip string, log Logger) {
 		conn.Shell("settings put global software_update 1 2>/dev/null")
 		conn.Shell("settings delete global auto_update 2>/dev/null")
 		conn.Close()
-		log.Success("  OTA re-enabled, Google apps disabled, WebView enabled")
+		log.Success("  OTA re-enabled, Google services kept enabled (WiFi/BT), WebView enabled")
 	}
 
-	// --- Step 8: Restart Nautilus apps ---
+	// --- Step 7: Restart Nautilus apps ---
 	step(7, "Restarting Nautilus apps")
 	conn, err = connect()
 	if err == nil {
