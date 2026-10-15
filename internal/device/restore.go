@@ -10,7 +10,7 @@ import (
 
 // RunRestore reverts the device to stock configuration.
 func RunRestore(ip string, log Logger) {
-	totalSteps := 8
+	totalSteps := 7
 
 	step := func(n int, name string) {
 		log.Step(fmt.Sprintf("[STEP %d/%d] %s", n, totalSteps, name))
@@ -30,8 +30,33 @@ func RunRestore(ip string, log Logger) {
 	log.Success("  Connected!")
 	conn.Close()
 
-	// --- Step 2: Restore stock packages and settings ---
-	step(2, "Restoring stock packages and settings")
+	// --- Step 2: Remove SerialBridge ---
+	// Done before re-enabling the stock serial apps, so the bridge and a stock
+	// app never hold /dev/ttyS4 at the same time on a half-restored bike.
+	step(2, "Removing SerialBridge")
+	conn, err = connect()
+	if err != nil {
+		log.Error(fmt.Sprintf("  Connection failed: %v", err))
+		log.Warn("  Nothing was changed. Run Restore again.")
+		return
+	}
+	conn.Shell("am force-stop io.freewheel.bridge 2>/dev/null")
+	out, _ := conn.Shell("pm uninstall io.freewheel.bridge 2>/dev/null")
+	left, _ := conn.Shell("pm list packages io.freewheel.bridge 2>/dev/null")
+	if strings.Contains(left, "io.freewheel.bridge") {
+		// Keep it from reading the serial port alongside the stock apps.
+		conn.Shell("pm disable-user --user 0 io.freewheel.bridge 2>/dev/null")
+		conn.Shell("am force-stop io.freewheel.bridge 2>/dev/null")
+		log.Warn("  SerialBridge could not be uninstalled; disabled it instead")
+	} else if strings.Contains(out, "Success") {
+		log.Success("  SerialBridge uninstalled")
+	} else {
+		log.Dim("  SerialBridge not installed")
+	}
+	conn.Close()
+
+	// --- Step 3: Restore stock packages and settings ---
+	step(3, "Restoring stock packages and settings")
 	conn, err = connect()
 	if err == nil {
 		stockPkgs := []string{
@@ -52,14 +77,17 @@ func RunRestore(ip string, log Logger) {
 		conn.Shell("settings put secure notification_switch 0")
 		conn.Shell("settings put secure ntls_launcher_preference 1")
 		conn.Shell("settings put global stay_on_while_plugged_in 0")
+		// Serial port overrides used only by SerialBridge
+		conn.Shell("settings delete global freewheel_serial_dev 2>/dev/null")
+		conn.Shell("settings delete global freewheel_serial_baud 2>/dev/null")
 		// Keep .bowflex file — ADB must remain enabled so user can reconnect
 		conn.Shell("rm /sdcard/Download/MiscSettings/asset_manager_disabled 2>/dev/null")
 		conn.Close()
 		log.Success("  Stock packages and settings restored")
 	}
 
-	// --- Step 3: Remove VeloLauncher and re-enable stock launchers ---
-	step(3, "Removing VeloLauncher")
+	// --- Step 4: Remove VeloLauncher and re-enable stock launchers ---
+	step(4, "Removing VeloLauncher")
 	conn, err = connect()
 	if err == nil {
 		conn.Shell("am force-stop io.freewheel.launcher 2>/dev/null")
@@ -78,23 +106,7 @@ func RunRestore(ip string, log Logger) {
 		}
 	}
 
-	// --- Step 4: Remove SerialBridge + re-enable NautilusLauncher ---
-	step(4, "Removing SerialBridge, restoring NautilusLauncher")
-	conn, err = connect()
-	if err == nil {
-		conn.Shell("am force-stop io.freewheel.bridge 2>/dev/null")
-		out, _ := conn.Shell("pm uninstall io.freewheel.bridge 2>/dev/null")
-		conn.Shell("cmd package install-existing com.nautilus.nautiluslauncher 2>/dev/null")
-		conn.Shell("pm enable com.nautilus.nautiluslauncher 2>/dev/null")
-		conn.Close()
-		if strings.Contains(out, "Success") {
-			log.Success("  SerialBridge uninstalled, NautilusLauncher re-enabled")
-		} else {
-			log.Dim("  SerialBridge not installed")
-		}
-	}
-
-	// --- Step 6: Clean factory_reset directory ---
+	// --- Step 5: Clean factory_reset directory ---
 	step(5, "Cleaning factory_reset directory")
 	conn, err = connect()
 	if err == nil {
@@ -116,12 +128,17 @@ func RunRestore(ip string, log Logger) {
 		}
 	}
 
-	// --- Step 7: Finalize stock configuration ---
+	// --- Step 6: Finalize stock configuration ---
 	step(6, "Finalizing stock configuration")
 	conn, err = connect()
 	if err == nil {
-		conn.Shell("pm disable-user --user 0 com.google.android.gms 2>/dev/null")
-		conn.Shell("pm disable-user --user 0 com.google.android.gsf 2>/dev/null")
+		// Do NOT disable GMS or GSF here (see commit 58ef6cc): on this
+		// Android 9 build they are required for the WiFi HAL and Bluetooth.
+		// Disabling them kills WiFi, which also kills ADB over WiFi, so the
+		// user could not reconnect to re-jailbreak. Re-enable them in case
+		// an older FreeWheel release disabled them.
+		conn.Shell("pm enable com.google.android.gms 2>/dev/null")
+		conn.Shell("pm enable com.google.android.gsf 2>/dev/null")
 		conn.Shell("pm disable-user --user 0 com.android.chrome 2>/dev/null")
 		conn.Shell("pm enable com.android.vending 2>/dev/null")
 		conn.Shell("pm enable com.google.android.webview 2>/dev/null")
@@ -130,10 +147,10 @@ func RunRestore(ip string, log Logger) {
 		conn.Shell("settings put global software_update 1 2>/dev/null")
 		conn.Shell("settings delete global auto_update 2>/dev/null")
 		conn.Close()
-		log.Success("  OTA re-enabled, Google apps disabled, WebView enabled")
+		log.Success("  OTA re-enabled, Google services kept enabled (WiFi/BT), WebView enabled")
 	}
 
-	// --- Step 8: Restart Nautilus apps ---
+	// --- Step 7: Restart Nautilus apps ---
 	step(7, "Restarting Nautilus apps")
 	conn, err = connect()
 	if err == nil {

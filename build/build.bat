@@ -1,35 +1,42 @@
 @echo off
 REM Build FreeWheel for Windows (no console window)
+REM CI builds and releases use build/ci-build.sh; this is for local builds.
 cd /d "%~dp0\.."
 set PATH=C:\msys64\mingw64\bin;C:\Program Files\Go\bin;%PATH%
 set CGO_ENABLED=1
 
-REM Copy latest APKs from velo-platform build outputs into assets/
-set VELO=..\velo-platform
-
-REM SerialBridge requires platform signing (android.uid.system)
-REM Use platform-signed APK from sign.sh, NOT the debug build
-if exist "%VELO%\freewheelbridge\build\outputs\apk\freewheelbridge.apk" (
-    copy /Y "%VELO%\freewheelbridge\build\outputs\apk\freewheelbridge.apk" assets\serialbridge.apk >nul
-    echo Copied freewheelbridge (platform-signed) -^> assets\serialbridge.apk
-) else (
-    echo WARNING: Platform-signed freewheelbridge.apk not found!
-    echo   Run: cd ..\velo-platform ^&^& ./gradlew :freewheelbridge:assembleDebug ^&^& freewheelbridge/sign.sh
-    echo   Using existing assets\serialbridge.apk
-)
-
-REM VeloLauncher uses debug signing (no platform key needed)
-if exist "%VELO%\launcher\build\outputs\apk\debug\launcher-debug.apk" (
-    copy /Y "%VELO%\launcher\build\outputs\apk\debug\launcher-debug.apk" assets\velolauncher.apk >nul
-    echo Copied launcher -^> assets\velolauncher.apk
-) else (
-    echo WARNING: launcher APK not found -- using existing assets\velolauncher.apk
-)
-
-go build -ldflags "-H windowsgui" -o freewheel.exe ./cmd/freewheel
+REM Embed the RELEASE APKs from the pinned velo-platform release
+REM (VELO_PLATFORM_VERSION). Never embed a local debug launcher build.
+set /p VELO_TAG=<VELO_PLATFORM_VERSION
+where gh >nul 2>nul
 if %ERRORLEVEL% equ 0 (
-    echo Built freewheel.exe successfully
+    echo Downloading APKs from velo-platform %VELO_TAG%...
+    gh release download %VELO_TAG% -R ril3y/velo-platform -p velolauncher.apk -p serialbridge.apk -D assets --clobber
+    if errorlevel 1 echo WARNING: download failed -- using existing assets\*.apk
+) else (
+    echo WARNING: GitHub CLI ^(gh^) not found -- using existing assets\*.apk
+    echo   Get them from https://github.com/ril3y/velo-platform/releases/tag/%VELO_TAG%
+)
+if not exist assets\velolauncher.apk (
+    echo ERROR: assets\velolauncher.apk missing
+    goto :end
+)
+if not exist assets\serialbridge.apk (
+    echo ERROR: assets\serialbridge.apk missing
+    goto :end
+)
+
+set VERSION=dev
+for /f %%i in ('git describe --tags --always --dirty 2^>nul') do set VERSION=%%i
+if "%VERSION:~0,1%"=="v" set VERSION=%VERSION:~1%
+set HASH=unknown
+for /f %%i in ('git rev-parse --short^=8 HEAD 2^>nul') do set HASH=%%i
+
+go build -ldflags "-H windowsgui -X main.version=%VERSION% -X main.gitHash=%HASH%" -o freewheel.exe ./cmd/freewheel
+if %ERRORLEVEL% equ 0 (
+    echo Built freewheel.exe %VERSION% successfully
 ) else (
     echo Build failed!
 )
+:end
 pause

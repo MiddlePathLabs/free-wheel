@@ -1,0 +1,57 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      velo_platform_tag:
+        description: 'velo-platform release tag to embed (blank = latest release)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: freewheel.exe (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed for git describe
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Vet and test
+        shell: bash
+        run: |
+          # go vet / test compile assets/embed.go, which needs the APK files
+          mkdir -p assets
+          for f in velolauncher serialbridge; do
+            [ -f "assets/$f.apk" ] || echo placeholder > "assets/$f.apk"
+          done
+          go vet ./...
+          go test ./...
+          rm -f assets/velolauncher.apk assets/serialbridge.apk
+
+      - name: Build
+        id: build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VELO_TAG_INPUT: ${{ github.event.inputs.velo_platform_tag }}
+        run: build/ci-build.sh "$VELO_TAG_INPUT"
+
+      - name: Upload freewheel.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: freewheel-windows-${{ steps.build.outputs.version }}
+          path: freewheel.exe
+          retention-days: 30

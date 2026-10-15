@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -155,7 +156,7 @@ func Connect(host string, port int, logFn ...func(string)) (*Conn, error) {
 		}
 	}
 	_ = logMsg
-	addr := fmt.Sprintf("%s:%d", host, port)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("TCP connect failed: %w", err)

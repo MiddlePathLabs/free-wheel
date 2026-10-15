@@ -11,6 +11,7 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -19,8 +20,9 @@ import (
 	"github.com/ril3y/bowflex-tool/internal/device"
 )
 
-// Run creates and runs the FreeWheel application.
-func Run() {
+// Run creates and runs the FreeWheel application. version and gitHash are
+// stamped in at build time (see .github/workflows/build.yml).
+func Run(version, gitHash string) {
 	// Wire up the FindAPK function for device operations
 	device.FindAPKFunc = assets.FindAPK
 
@@ -28,7 +30,11 @@ func Run() {
 
 	a := app.NewWithID("com.battlewithbytes.freewheel")
 	a.Settings().SetTheme(theme.DarkTheme())
-	w := a.NewWindow("FreeWheel")
+	versionLabel := version
+	if versionLabel != "dev" && !strings.HasPrefix(versionLabel, "v") {
+		versionLabel = "v" + versionLabel
+	}
+	w := a.NewWindow("FreeWheel " + versionLabel)
 	w.Resize(fyne.NewSize(520, 600))
 	w.SetFixedSize(true)
 
@@ -146,19 +152,33 @@ func Run() {
 			log.Error("Run Pre-Check first!")
 			return
 		}
-		jailbreakBtn.Disable()
-		precheckBtn.Disable()
-		scanBtn.Disable()
-		go func() {
-			device.RunJailbreak(ip, log)
-			fyne.Do(func() {
+		// The user must accept the disclaimer before anything is changed on
+		// the bike. Restore Stock is deliberately not gated by this.
+		disclaimer := widget.NewLabel(disclaimerText)
+		disclaimer.Wrapping = fyne.TextWrapWord
+		confirm := dialog.NewCustomConfirm("Before you jailbreak", "I understand, continue", "Cancel",
+			container.NewVScroll(disclaimer), func(accepted bool) {
+				if !accepted {
+					log.Dim("Jailbreak cancelled.")
+					return
+				}
+				log.Dim("Disclaimer accepted.")
 				jailbreakBtn.Disable()
-				preCheckPassed = false
-				precheckBtn.Enable()
-				scanBtn.Enable()
-				restoreBtn.Show()
-			})
-		}()
+				precheckBtn.Disable()
+				scanBtn.Disable()
+				go func() {
+					device.RunJailbreak(ip, log)
+					fyne.Do(func() {
+						jailbreakBtn.Disable()
+						preCheckPassed = false
+						precheckBtn.Enable()
+						scanBtn.Enable()
+						restoreBtn.Show()
+					})
+				}()
+			}, w)
+		confirm.Resize(fyne.NewSize(460, 420))
+		confirm.Show()
 	})
 	jailbreakBtn.Importance = widget.HighImportance
 	jailbreakBtn.Disable() // disabled until pre-check passes
@@ -262,7 +282,8 @@ func Run() {
 
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		log.Info("FreeWheel ready. Native ADB -- no external tools needed.")
+		log.Info(fmt.Sprintf("FreeWheel %s (%s) ready. Native ADB -- no external tools needed.", versionLabel, gitHash))
+		log.Warn(disclaimerOneLine)
 	}()
 
 	w.ShowAndRun()

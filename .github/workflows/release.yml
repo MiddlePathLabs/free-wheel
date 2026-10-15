@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release freewheel.exe
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed for git describe
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check release inputs
+        id: inputs
+        shell: bash
+        run: |
+          # Releases embed a pinned velo-platform release, never "latest"
+          VELO_TAG=$(tr -d '[:space:]' < VELO_PLATFORM_VERSION)
+          if [ -z "$VELO_TAG" ]; then
+            echo "::error::VELO_PLATFORM_VERSION is empty"
+            exit 1
+          fi
+          NOTES="docs/release-notes/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$NOTES" ]; then
+            echo "::error::Missing $NOTES"
+            exit 1
+          fi
+          echo "velo_tag=$VELO_TAG" >> "$GITHUB_OUTPUT"
+          echo "notes=$NOTES" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        id: build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VELO_TAG: ${{ steps.inputs.outputs.velo_tag }}
+          STRICT_SIGNER: "1"
+        run: build/ci-build.sh "$VELO_TAG"
+
+      - name: Checksums and release body
+        shell: bash
+        env:
+          NOTES: ${{ steps.inputs.outputs.notes }}
+          VELO_TAG: ${{ steps.build.outputs.velo_tag }}
+        run: |
+          sha256sum freewheel.exe | sed 's/ \*/  /' > SHA256SUMS
+          cat SHA256SUMS
+          {
+            cat "$NOTES"
+            echo ""
+            echo "---"
+            echo "Built from \`${GITHUB_SHA::8}\`, embedding [velo-platform ${VELO_TAG}](https://github.com/ril3y/velo-platform/releases/tag/${VELO_TAG}) APKs:"
+            echo '```'
+            sha256sum assets/velolauncher.apk assets/serialbridge.apk freewheel.exe | sed 's/ \*/  /'
+            echo '```'
+          } > release-body.md
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: FreeWheel ${{ github.ref_name }}
+          body_path: release-body.md
+          files: |
+            freewheel.exe
+            SHA256SUMS
