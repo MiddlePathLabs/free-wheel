@@ -39,8 +39,14 @@ sha256sum assets/velolauncher.apk assets/serialbridge.apk
 PLATFORM_CERT_SHA256="2d370c21f5dfd553d2a796314b70925fb38adeef90864c920bbbbb12887d3522"
 if ! CGO_ENABLED=0 go run ./tools/apkcert "$PLATFORM_CERT_SHA256" \
     assets/velolauncher.apk assets/serialbridge.apk; then
-  echo "::error::APKs from $VELO_TAG are not signed with the platform key"
-  exit 1
+  # Releases (STRICT_SIGNER=1) must never ship a mis-signed APK. CI builds only
+  # warn, so PRs stay buildable while the latest velo-platform release predates
+  # platform-signed launchers (v1.4.0 and earlier).
+  if [ "${STRICT_SIGNER:-0}" = "1" ]; then
+    echo "::error::APKs from $VELO_TAG are not signed with the platform key"
+    exit 1
+  fi
+  echo "::warning::APKs from $VELO_TAG are not signed with the platform key (not a release build, continuing)"
 fi
 
 # --- Version info ---

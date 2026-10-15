@@ -47,6 +47,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VELO_TAG: ${{ steps.inputs.outputs.velo_tag }}
+          STRICT_SIGNER: "1"
         run: build/ci-build.sh "$VELO_TAG"
 
       - name: Checksums and release body
