@@ -27,6 +27,10 @@ func RunJailbreak(ip string, log Logger) {
 	}
 
 	// installAPK pushes and installs an APK by name. Returns true on success.
+	// It updates in place ("pm install -r") and only uninstalls the old
+	// version when Android refuses the update (different signing key, e.g.
+	// the v1.4.0 debug-signed launcher, or a newer version already
+	// installed), so a dropped connection never leaves the app missing.
 	installAPK := func(name, pkg string) bool {
 		apkPath := FindAPKFunc(name)
 		if apkPath == "" {
@@ -35,16 +39,8 @@ func RunJailbreak(ip string, log Logger) {
 		}
 		log.Dim(fmt.Sprintf("  Using: %s", apkPath))
 
-		// Uninstall old version first
-		conn, err := connect()
-		if err == nil {
-			conn.Shell(fmt.Sprintf("am force-stop %s 2>/dev/null", pkg))
-			conn.Shell(fmt.Sprintf("pm uninstall %s 2>/dev/null", pkg))
-			conn.Close()
-		}
-
 		// Push APK
-		conn, err = connect()
+		conn, err := connect()
 		if err != nil {
 			log.Error(fmt.Sprintf("  Connection failed: %v", err))
 			return false
@@ -57,14 +53,35 @@ func RunJailbreak(ip string, log Logger) {
 			return false
 		}
 
-		// Install
-		conn, err = connect()
-		if err != nil {
-			log.Error(fmt.Sprintf("  Connection failed: %v", err))
+		install := func() (string, bool) {
+			conn, err := connect()
+			if err != nil {
+				log.Error(fmt.Sprintf("  Connection failed: %v", err))
+				return "", false
+			}
+			defer conn.Close()
+			conn.Shell(fmt.Sprintf("am force-stop %s 2>/dev/null", pkg))
+			out, _ := conn.Shell(fmt.Sprintf("pm install -r %s 2>&1", tmpPath))
+			return out, true
+		}
+
+		out, ok := install()
+		if !ok {
 			return false
 		}
-		out, _ := conn.Shell(fmt.Sprintf("pm install -r %s 2>&1", tmpPath))
-		conn.Close()
+		if !strings.Contains(out, "Success") && installNeedsUninstall(out) {
+			log.Warn(fmt.Sprintf("  Can't update %s in place (%s) — uninstalling the old version first", pkg, installFailureCode(out)))
+			conn, err := connect()
+			if err != nil {
+				log.Error(fmt.Sprintf("  Connection failed: %v", err))
+				return false
+			}
+			conn.Shell(fmt.Sprintf("pm uninstall %s 2>/dev/null", pkg))
+			conn.Close()
+			if out, ok = install(); !ok {
+				return false
+			}
+		}
 		outTrimmed := strings.TrimSpace(out)
 		if !strings.Contains(out, "Success") {
 			if outTrimmed == "" {
@@ -135,8 +152,8 @@ func RunJailbreak(ip string, log Logger) {
 		} else if failed && isUpdate {
 			log.Step("")
 			log.Warn("=== UPDATE HAD ERRORS ===")
-			log.Warn("  Some steps failed but device was already jailbroken.")
-			log.Warn("  The bike should still work. Check the log above for details.")
+			log.Warn("  Some steps failed on an already-jailbroken bike. Check the log above for details.")
+			reportUpdateFailureState(connect, log)
 		}
 	}()
 
@@ -431,5 +448,64 @@ func checkBridgeHealth(connect func() (*adb.Conn, error), log Logger) {
 		log.Success("  TCP:9999 alive (SerialBridge serving sensor data)")
 	} else {
 		log.Dim("  TCP:9999 not yet listening (SerialBridge may need a moment)")
+	}
+}
+
+var installFailureRe = regexp.MustCompile(`INSTALL_FAILED_[A-Z_]+`)
+
+// installFailureCode returns the INSTALL_FAILED_* code in "pm install"
+// output, or "" if there is none.
+func installFailureCode(out string) string {
+	return installFailureRe.FindString(out)
+}
+
+// installNeedsUninstall reports whether "pm install -r" failed only because
+// the installed copy blocks an in-place update, so uninstalling it first and
+// retrying can succeed. SHARED_USER_INCOMPATIBLE is not one of them: the new
+// APK isn't signed for android.uid.system, so uninstalling the working
+// SerialBridge would only lose it.
+func installNeedsUninstall(out string) bool {
+	switch installFailureCode(out) {
+	case "INSTALL_FAILED_UPDATE_INCOMPATIBLE",
+		"INSTALL_FAILED_VERSION_DOWNGRADE":
+		return true
+	}
+	return false
+}
+
+// reportUpdateFailureState checks what a failed update left on the bike and
+// tells the user plainly. If VeloLauncher is gone, the stock Android launcher
+// is re-enabled so the bike still has a home screen.
+func reportUpdateFailureState(connect func() (*adb.Conn, error), log Logger) {
+	conn, err := connect()
+	if err != nil {
+		log.Error(fmt.Sprintf("  Could not reconnect to check the bike: %v", err))
+		log.Warn("  Run Jailbreak again once the bike is reachable. If the screen is blank, run Restore.")
+		return
+	}
+	defer conn.Close()
+	out, err := conn.Shell("pm list packages 2>/dev/null | grep -E 'freewheel.launcher|freewheel.bridge'")
+	if err != nil {
+		log.Warn("  Could not check which FreeWheel apps are installed. Run Jailbreak again.")
+		return
+	}
+	hasLauncher := strings.Contains(out, "io.freewheel.launcher")
+	hasBridge := strings.Contains(out, "io.freewheel.bridge")
+
+	if hasLauncher {
+		log.Info("  VeloLauncher is still installed.")
+	} else {
+		log.Error("  VeloLauncher is NOT installed — re-enabling the stock Android launcher so the bike has a home screen")
+		conn.Shell("pm enable com.android.launcher3 2>/dev/null")
+		conn.Shell("pm enable com.android.quickstep 2>/dev/null")
+		conn.Shell("input keyevent KEYCODE_HOME")
+	}
+	if hasBridge {
+		log.Info("  SerialBridge is still installed.")
+	} else {
+		log.Error("  SerialBridge is NOT installed — bike sensors will not work")
+	}
+	if !hasLauncher || !hasBridge {
+		log.Warn("  Run Jailbreak again to finish the update, or Restore to go back to stock.")
 	}
 }
