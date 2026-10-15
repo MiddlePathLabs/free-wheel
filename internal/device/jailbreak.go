@@ -2,7 +2,10 @@ package device
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ril3y/bowflex-tool/internal/adb"
 )
@@ -185,13 +188,30 @@ func RunJailbreak(ip string, log Logger) {
 		return
 	}
 	log.Success("  SerialBridge installed (io.freewheel.bridge)")
+	// Stock apps must be stopped BEFORE the bridge starts: if two processes
+	// read /dev/ttyS4 at once, each gets partial frames and sensors look dead.
 	conn, err = connect()
-	if err == nil {
+	if err != nil {
+		log.Warn(fmt.Sprintf("  Could not reconnect to disable NautilusLauncher: %v", err))
+	} else {
 		conn.Shell("am force-stop com.nautilus.nautiluslauncher 2>/dev/null")
 		conn.Shell("pm disable-user --user 0 com.nautilus.nautiluslauncher 2>/dev/null")
+		conn.Close()
+		log.Dim("  Checking stock serial apps are stopped...")
+		stopStockSerialApps(connect, log)
+	}
+	conn, err = connect()
+	if err != nil {
+		log.Warn(fmt.Sprintf("  Could not reconnect to start SerialBridge: %v", err))
+		log.Warn("  VeloLauncher starts it on next boot; reboot the bike after jailbreak if sensors stay at zero.")
+	} else {
 		conn.Shell("am start-foreground-service -n io.freewheel.bridge/.BridgeService 2>/dev/null")
 		conn.Close()
-		log.Success("  NautilusLauncher disabled, SerialBridge started on /dev/ttyS4")
+		log.Success("  NautilusLauncher disabled, SerialBridge started")
+		// Re-check after the bridge is up, in case a stock app was respawned.
+		time.Sleep(2 * time.Second)
+		log.Dim("  Verifying stock serial apps stayed stopped...")
+		stopStockSerialApps(connect, log)
 	}
 
 	// --- Step 6: Install VeloLauncher (critical) ---
@@ -202,15 +222,31 @@ func RunJailbreak(ip string, log Logger) {
 	}
 	log.Success("  VeloLauncher installed")
 	conn, err = connect()
-	if err == nil {
+	if err != nil {
+		log.Warn(fmt.Sprintf("  Could not reconnect to set home screen and permissions: %v", err))
+		log.Warn("  Run Jailbreak again (it will update in place) to finish this step.")
+	} else {
 		conn.Shell("cmd package set-home-activity io.freewheel.launcher/.MainActivity")
 		conn.Shell("pm disable-user --user 0 com.android.launcher3 2>/dev/null")
 		conn.Shell("pm disable-user --user 0 com.android.quickstep 2>/dev/null")
 		conn.Shell("appops set io.freewheel.launcher SYSTEM_ALERT_WINDOW allow")
+		// Belt and braces: SYSTEM_ALERT_WINDOW is an appop on Android 9, so
+		// pm grant usually refuses it. Harmless if it does.
+		conn.Shell("pm grant io.freewheel.launcher android.permission.SYSTEM_ALERT_WINDOW 2>/dev/null")
 		conn.Shell("pm grant io.freewheel.launcher android.permission.WRITE_SETTINGS 2>/dev/null")
+		opOut, _ := conn.Shell("appops get io.freewheel.launcher SYSTEM_ALERT_WINDOW 2>/dev/null")
 		conn.Close()
 		log.Success("  Set as default home, other launchers disabled")
-		log.Dim("  Overlay + settings permissions granted")
+		switch {
+		case overlayAllowed(opOut):
+			log.Dim("  Overlay + settings permissions granted")
+		case strings.TrimSpace(opOut) == "":
+			log.Warn("  Could not verify overlay permission (floating home button / ride stats).")
+			log.Warn("  If the overlay is missing, run: adb shell appops set io.freewheel.launcher SYSTEM_ALERT_WINDOW allow")
+		default:
+			log.Warn(fmt.Sprintf("  Overlay permission not granted (%s)", strings.TrimSpace(opOut)))
+			log.Warn("  Fix manually: adb shell appops set io.freewheel.launcher SYSTEM_ALERT_WINDOW allow")
+		}
 	}
 
 	// --- Step 7: Apply system settings ---
@@ -240,9 +276,13 @@ func RunJailbreak(ip string, log Logger) {
 		conn.Close()
 	}
 
-	// ADB persistence — persist props survive reboots
+	// --- Step 8: ADB persistence ---
+	step(8, "Keeping ADB over WiFi enabled")
+	// persist props survive reboots
 	conn, err = connect()
-	if err == nil {
+	if err != nil {
+		log.Warn(fmt.Sprintf("  Could not reconnect to set ADB persistence: %v", err))
+	} else {
 		conn.Shell("setprop persist.sys.usb.config adb")
 		conn.Shell("setprop persist.adb.tcp.port 5555")
 		conn.Shell("settings put global adb_enabled 1")
@@ -250,8 +290,8 @@ func RunJailbreak(ip string, log Logger) {
 		log.Dim("  ADB persistence set (persist.sys.usb.config, persist.adb.tcp.port)")
 	}
 
-	// --- Step 9: Final setup ---
-	step(9, "Final setup")
+	// --- Step 9: Final setup + sensor check ---
+	step(9, "Final setup and sensor check")
 
 	conn, err = connect()
 	if err == nil {
@@ -260,23 +300,13 @@ func RunJailbreak(ip string, log Logger) {
 		log.Success("  Home screen active")
 	}
 
-	// Check SerialBridge TCP:9999
-	conn, err = connect()
-	if err == nil {
-		tcpCheck, _ := conn.Shell("nc -z localhost 9999 2>/dev/null && echo ALIVE || echo DEAD")
-		conn.Close()
-		if strings.Contains(tcpCheck, "ALIVE") {
-			log.Success("  TCP:9999 alive (SerialBridge serving sensor data)")
-		} else {
-			log.Dim("  TCP:9999 not yet listening (SerialBridge may need a moment)")
-		}
-	}
+	checkBridgeHealth(connect, log)
 
 	// Final summary
 	log.Step("")
 	log.Success("=== JAILBREAK COMPLETE ===")
 	log.Info("")
-	log.Dim("  SerialBridge owns /dev/ttyS4, serves TCP:9999 (NautilusLauncher disabled)")
+	log.Dim("  SerialBridge owns the bike serial port, serves TCP:9999 (NautilusLauncher disabled)")
 	log.Dim("  VeloLauncher set as home screen (free, no subscription)")
 	log.Dim("  JRNY, AppMonitor, OTA all disabled (persists across reboots)")
 	log.Dim("  Chrome disabled, Google services kept enabled (required for WiFi/BT)")
@@ -285,4 +315,121 @@ func RunJailbreak(ip string, log Logger) {
 	log.Info("")
 	log.Info("VeloLauncher BootReceiver restarts itself + SerialBridge on reboot.")
 	log.Info("All package disabling persists natively across Android reboots.")
+}
+
+// stockSerialPkgs are the stock apps that read the bike's serial port. If one
+// is still running alongside SerialBridge, both get partial frames.
+var stockSerialPkgs = []string{"com.nautilus.nautiluslauncher", "com.nautilus.bowflex.usb"}
+
+// stopStockSerialApps verifies the stock serial apps are disabled and not
+// running, stopping any that are. Only logs; never fails the jailbreak.
+func stopStockSerialApps(connect func() (*adb.Conn, error), log Logger) {
+	conn, err := connect()
+	if err != nil {
+		log.Warn(fmt.Sprintf("  Could not check stock apps: %v", err))
+		return
+	}
+	defer conn.Close()
+
+	disabledOut, _ := conn.Shell("pm list packages -d 2>/dev/null")
+	disabled := map[string]bool{}
+	for _, line := range strings.Split(disabledOut, "\n") {
+		disabled[strings.TrimPrefix(strings.TrimSpace(line), "package:")] = true
+	}
+	pidof := func(pkg string) string {
+		out, _ := conn.Shell(fmt.Sprintf("pidof %s 2>/dev/null", pkg))
+		return strings.TrimSpace(out)
+	}
+
+	listed := strings.TrimSpace(disabledOut) != ""
+	if !listed {
+		log.Dim("  Could not list disabled packages; re-applying disable")
+	}
+
+	for _, pkg := range stockSerialPkgs {
+		if !disabled[pkg] {
+			if listed {
+				log.Warn(fmt.Sprintf("  %s was not disabled — disabling it", pkg))
+			}
+			conn.Shell(fmt.Sprintf("pm disable-user --user 0 %s 2>/dev/null", pkg))
+		}
+		pid := pidof(pkg)
+		if pid == "" {
+			log.Dim(fmt.Sprintf("  %s: disabled, not running", pkg))
+			continue
+		}
+		log.Warn(fmt.Sprintf("  %s still running (pid %s) — stopping it", pkg, pid))
+		conn.Shell(fmt.Sprintf("am force-stop %s 2>/dev/null", pkg))
+		conn.Shell(fmt.Sprintf("am kill %s 2>/dev/null", pkg))
+		if pid = pidof(pkg); pid != "" {
+			log.Warn(fmt.Sprintf("  %s is STILL running (pid %s); it may compete with SerialBridge", pkg, pid))
+			log.Warn("  Reboot the bike after jailbreak finishes to clear it.")
+		} else {
+			log.Dim(fmt.Sprintf("  %s stopped", pkg))
+		}
+	}
+}
+
+var overlayAllowRe = regexp.MustCompile(`SYSTEM_ALERT_WINDOW:\s*allow\b`)
+
+// overlayAllowed reports whether "appops get" output shows the overlay allowed.
+func overlayAllowed(appopsOut string) bool {
+	return overlayAllowRe.MatchString(appopsOut)
+}
+
+// checkBridgeHealth waits briefly for a SerialBridge DIAG line (bridge
+// v1.5.0+) and logs a plain verdict. Older bridges don't log DIAG, so fall
+// back to checking that TCP:9999 is listening. Never fails the jailbreak.
+func checkBridgeHealth(connect func() (*adb.Conn, error), log Logger) {
+	// Only trust lines logged from now on, so a bridge from before an update
+	// can't produce a stale verdict. -1 (unknown) accepts any line.
+	since := -1.0
+	if conn, err := connect(); err == nil {
+		out, _ := conn.Shell("date +%s")
+		conn.Close()
+		if ts, err := strconv.ParseFloat(strings.TrimSpace(out), 64); err == nil {
+			since = ts
+		}
+	}
+
+	if conn, err := connect(); err == nil {
+		dev, _ := conn.Shell("settings get global freewheel_serial_dev 2>/dev/null")
+		baud, _ := conn.Shell("settings get global freewheel_serial_baud 2>/dev/null")
+		conn.Close()
+		dev, baud = strings.TrimSpace(dev), strings.TrimSpace(baud)
+		if (dev != "" && dev != "null") || (baud != "" && baud != "null") {
+			log.Info(fmt.Sprintf("  Serial port override active: freewheel_serial_dev=%s freewheel_serial_baud=%s", dev, baud))
+		}
+	}
+
+	log.Dim("  Waiting for SerialBridge status (up to 15s)...")
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if conn, err := connect(); err == nil {
+			out, _ := conn.Shell("logcat -d -v epoch -s SerialBridge:I 2>/dev/null | grep ' DIAG ' | tail -n 5")
+			conn.Close()
+			if d, ok := latestDiag(out, since); ok {
+				reportDiag(d, log)
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(3 * time.Second)
+	}
+
+	log.Dim("  No status line from SerialBridge (older bridge build?) — checking TCP:9999")
+	conn, err := connect()
+	if err != nil {
+		log.Warn(fmt.Sprintf("  Could not reconnect to check SerialBridge: %v", err))
+		return
+	}
+	tcpCheck, _ := conn.Shell("nc -z localhost 9999 2>/dev/null && echo ALIVE || echo DEAD")
+	conn.Close()
+	if strings.Contains(tcpCheck, "ALIVE") {
+		log.Success("  TCP:9999 alive (SerialBridge serving sensor data)")
+	} else {
+		log.Dim("  TCP:9999 not yet listening (SerialBridge may need a moment)")
+	}
 }
