@@ -30,8 +30,33 @@ func RunRestore(ip string, log Logger) {
 	log.Success("  Connected!")
 	conn.Close()
 
-	// --- Step 2: Restore stock packages and settings ---
-	step(2, "Restoring stock packages and settings")
+	// --- Step 2: Remove SerialBridge ---
+	// Done before re-enabling the stock serial apps, so the bridge and a stock
+	// app never hold /dev/ttyS4 at the same time on a half-restored bike.
+	step(2, "Removing SerialBridge")
+	conn, err = connect()
+	if err != nil {
+		log.Error(fmt.Sprintf("  Connection failed: %v", err))
+		log.Warn("  Nothing was changed. Run Restore again.")
+		return
+	}
+	conn.Shell("am force-stop io.freewheel.bridge 2>/dev/null")
+	out, _ := conn.Shell("pm uninstall io.freewheel.bridge 2>/dev/null")
+	left, _ := conn.Shell("pm list packages io.freewheel.bridge 2>/dev/null")
+	if strings.Contains(left, "io.freewheel.bridge") {
+		// Keep it from reading the serial port alongside the stock apps.
+		conn.Shell("pm disable-user --user 0 io.freewheel.bridge 2>/dev/null")
+		conn.Shell("am force-stop io.freewheel.bridge 2>/dev/null")
+		log.Warn("  SerialBridge could not be uninstalled; disabled it instead")
+	} else if strings.Contains(out, "Success") {
+		log.Success("  SerialBridge uninstalled")
+	} else {
+		log.Dim("  SerialBridge not installed")
+	}
+	conn.Close()
+
+	// --- Step 3: Restore stock packages and settings ---
+	step(3, "Restoring stock packages and settings")
 	conn, err = connect()
 	if err == nil {
 		stockPkgs := []string{
@@ -61,8 +86,8 @@ func RunRestore(ip string, log Logger) {
 		log.Success("  Stock packages and settings restored")
 	}
 
-	// --- Step 3: Remove VeloLauncher and re-enable stock launchers ---
-	step(3, "Removing VeloLauncher")
+	// --- Step 4: Remove VeloLauncher and re-enable stock launchers ---
+	step(4, "Removing VeloLauncher")
 	conn, err = connect()
 	if err == nil {
 		conn.Shell("am force-stop io.freewheel.launcher 2>/dev/null")
@@ -78,22 +103,6 @@ func RunRestore(ip string, log Logger) {
 			log.Success("  VeloLauncher uninstalled, stock launchers re-enabled")
 		} else {
 			log.Dim("  VeloLauncher not installed")
-		}
-	}
-
-	// --- Step 4: Remove SerialBridge + re-enable NautilusLauncher ---
-	step(4, "Removing SerialBridge, restoring NautilusLauncher")
-	conn, err = connect()
-	if err == nil {
-		conn.Shell("am force-stop io.freewheel.bridge 2>/dev/null")
-		out, _ := conn.Shell("pm uninstall io.freewheel.bridge 2>/dev/null")
-		conn.Shell("cmd package install-existing com.nautilus.nautiluslauncher 2>/dev/null")
-		conn.Shell("pm enable com.nautilus.nautiluslauncher 2>/dev/null")
-		conn.Close()
-		if strings.Contains(out, "Success") {
-			log.Success("  SerialBridge uninstalled, NautilusLauncher re-enabled")
-		} else {
-			log.Dim("  SerialBridge not installed")
 		}
 	}
 
