@@ -121,19 +121,33 @@ func Run(version, gitHash string) {
 		precheckBtn.Disable()
 		scanBtn.Disable()
 		go func() {
-			passed := device.PreflightCheck(ip, log)
+			result := device.PreflightCheck(ip, log)
 			fyne.Do(func() {
 				preCheckedIP = ""
-				if passed {
-					preCheckedIP = ip
-				}
+				jailbreakBtn.Disable()
 				precheckBtn.Enable()
 				scanBtn.Enable()
-				if passed {
+				switch result {
+				case device.PreflightPassed:
+					preCheckedIP = ip
 					jailbreakBtn.Enable()
 					log.Success("Pre-check passed! Jailbreak button is now enabled.")
-				} else {
-					jailbreakBtn.Disable()
+				case device.PreflightNeedsOverride:
+					msg := widget.NewLabel(noJRNYOverrideText)
+					msg.Wrapping = fyne.TextWrapWord
+					confirm := dialog.NewCustomConfirm("JRNY is not installed", "Allow jailbreak anyway", "Cancel",
+						container.NewVScroll(msg), func(accepted bool) {
+							if !accepted {
+								log.Dim("Override declined. Jailbreak stays disabled.")
+								return
+							}
+							preCheckedIP = ip
+							jailbreakBtn.Enable()
+							log.Warn("Override accepted: jailbreak allowed without JRNY. Going back to stock needs a factory reset.")
+						}, w)
+					confirm.Resize(fyne.NewSize(460, 360))
+					confirm.Show()
+				default:
 					log.Error("Pre-check FAILED. Copy the output above and send to FreeWheel devs.")
 					log.Warn("Use the copy button (top-right of log) to copy the full output.")
 				}

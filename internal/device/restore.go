@@ -179,10 +179,19 @@ func RunRestore(ip string, log Logger) {
 		time.Sleep(2 * time.Second)
 		conn, err = connect()
 	}
+	// A bike jailbroken straight after a factory reset never had JRNY, and
+	// install-existing can't bring back an app that isn't on the system image.
+	noJRNY := false
 	if err == nil {
-		conn.Shell("am start -n com.nautilus.bowflex.usb/com.nautilus.bowflex.usb.ui.activity.splash.SplashActivity")
+		out, lerr := conn.Shell("pm list packages com.nautilus.bowflex.usb 2>/dev/null")
+		noJRNY = lerr == nil && !listsPackage(out, "com.nautilus.bowflex.usb")
+		if noJRNY {
+			log.Warn("  JRNY is not installed on this bike, so it can't be restarted")
+		} else {
+			conn.Shell("am start -n com.nautilus.bowflex.usb/com.nautilus.bowflex.usb.ui.activity.splash.SplashActivity")
+			log.Success("  NautilusLauncher and JRNY restarted")
+		}
 		conn.Close()
-		log.Success("  NautilusLauncher and JRNY restarted")
 	} else {
 		skip("restart Nautilus apps", err)
 	}
@@ -193,6 +202,15 @@ func RunRestore(ip string, log Logger) {
 		log.Error("=== RESTORE INCOMPLETE ===")
 		log.Error(fmt.Sprintf("  Could not reach the bike to: %s", strings.Join(skipped, ", ")))
 		log.Warn("  Make sure the bike is on WiFi, then run Restore Stock again.")
+		return
+	}
+	if noJRNY {
+		log.Warn("=== FREEWHEEL REMOVED, BUT JRNY IS NOT INSTALLED ===")
+		log.Info("")
+		log.Dim("  - SerialBridge and VeloLauncher uninstalled")
+		log.Dim("  - Stock Android launcher (Launcher3) re-enabled, so the bike has a home screen")
+		log.Info("")
+		log.Warn("  To get JRNY back, factory reset the bike and complete the Nautilus setup.")
 		return
 	}
 	log.Success("=== STOCK RESTORED ===")

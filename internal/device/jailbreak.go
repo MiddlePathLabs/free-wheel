@@ -399,6 +399,11 @@ func stopStockSerialApps(connect func() (*adb.Conn, error), log Logger) {
 	}
 
 	for _, pkg := range stockSerialPkgs {
+		// A factory-reset bike may not have the stock apps at all.
+		if out, err := conn.Shell(fmt.Sprintf("pm list packages %s 2>/dev/null", pkg)); err == nil && !listsPackage(out, pkg) {
+			log.Dim(fmt.Sprintf("  %s: not installed", pkg))
+			continue
+		}
 		if !disabled[pkg] {
 			if listed {
 				log.Warn(fmt.Sprintf("  %s was not disabled — disabling it", pkg))
@@ -420,6 +425,17 @@ func stopStockSerialApps(connect func() (*adb.Conn, error), log Logger) {
 			log.Dim(fmt.Sprintf("  %s stopped", pkg))
 		}
 	}
+}
+
+// listsPackage reports whether "pm list packages" output names pkg exactly
+// (pm filters by substring, so "com.foo" also lists "com.foo.bar").
+func listsPackage(pmOut, pkg string) bool {
+	for _, line := range strings.Split(pmOut, "\n") {
+		if strings.TrimSpace(line) == "package:"+pkg {
+			return true
+		}
+	}
+	return false
 }
 
 var overlayAllowRe = regexp.MustCompile(`SYSTEM_ALERT_WINDOW:\s*allow\b`)
